@@ -28,7 +28,7 @@ public class BKPerfTest {
                 .setClientConnectTimeoutMillis(10000)
                 .setZkTimeout(10000);
 
-        if (System.getProperty("tls.enable").equals("true")) {
+        if (System.getProperty("tls.enable") != null && System.getProperty("tls.enable").equals("true")) {
             config = config.setTLSProvider("OpenSSL");
             config = config.setTLSTrustStore(System.getProperty("tls.trustStore.path"));
             config.setTLSTrustStorePasswordPath(System.getProperty("tls.trustStore.passwordPath"));
@@ -121,7 +121,19 @@ public class BKPerfTest {
         return entries;
     }
 
+    public static void deleteLedger(BookKeeper bk, long ledgerId){
+        try {
+            bk.deleteLedger(ledgerId);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
     public static void main(String[] args) {
+        writeReadAndCleanClassic();
+    }
+
+    public static void writeReadAndCleanClassic(){
         // Connect to zk. eg. "127.0.0.1:2181"; "wal-1-zk-client:2281"
         BookKeeper bk = createBkClient();
 
@@ -141,9 +153,26 @@ public class BKPerfTest {
             System.out.println("Successfully read entry " + entry.getEntryId());
         }
 
-        System.out.println("Current ledgers in the system: "+listAllLedgers(bk));
+        // try to close the reader and writer; delete the ledger
+        long ledgerId = lh.getId();
+        try {
+            lh.close();
+            reader.close();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        deleteLedger(bk, ledgerId);
 
+        // list all ledgers
+        System.out.println("Ledgers in the system" + listAllLedgers(bk));
+
+        // close the bookkeeper client
+        try {
+            bk.close();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
         System.out.println("Done");
-        System.exit(0); //for some reason gradle does not complete the run otherwise.
+        System.exit(0); // otherwise some background threads get it to hang here.
     }
 }
