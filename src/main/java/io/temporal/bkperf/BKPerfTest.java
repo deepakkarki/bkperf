@@ -1,23 +1,61 @@
 package io.temporal.bkperf;
 
-import org.apache.bookkeeper.client.BKException;
-import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.*;
 import org.apache.bookkeeper.client.BookKeeper.DigestType;
-import org.apache.bookkeeper.client.LedgerHandle;
-import org.apache.bookkeeper.client.LedgerEntry;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.client.ZKClientConfig;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class BKPerfTest {
 
-    public static BookKeeper createBkClient(String zkConnectionString) {
+    // System properties required
+    //      tls.enable tls.trustStore.path tls.trustStore.passwordPath
+    //      tls.clientAuth tls.keyStore.path tls.keyStore.passwordPath
+    public static BookKeeper createBkClient() {
+        int writeTimeout = (int) Math.ceil(6000 / 1000.0); // hardcoded values, replace later
+        int readTimeout = (int) Math.ceil(6000 / 1000.0);
+        ClientConfiguration config = new ClientConfiguration()
+                .setClientTcpNoDelay(true)
+                .setAddEntryTimeout(writeTimeout)
+                .setReadEntryTimeout(readTimeout)
+                .setGetBookieInfoTimeout(readTimeout)
+                .setEnableDigestTypeAutodetection(true)
+                .setClientConnectTimeoutMillis(10000)
+                .setZkTimeout(10000);
+
+        if (System.getProperty("tls.enable").equals("true")) {
+            config = config.setTLSProvider("OpenSSL");
+            config = config.setTLSTrustStore(System.getProperty("tls.trustStore.path"));
+            config.setTLSTrustStorePasswordPath(System.getProperty("tls.trustStore.passwordPath"));
+            config.setZkEnableSecurity(true);
+            if (System.getProperty("tls.clientAuth").equals("true")) {
+                config.setTLSClientAuthentication(true);
+            }
+            if (!System.getProperty("tls.keyStore.path").equals("")) {
+                config.setTLSKeyStore(System.getProperty("tls.keyStore.path"));
+            }
+            if (!System.getProperty("tls.keyStore.passwordPath").equals("")) {
+                config.setTLSKeyStorePasswordPath(System.getProperty("tls.keyStore.passwordPath"));
+            }
+        }
+
+        String path = System.getProperty("zk.path");
+        if (path == null){
+            path = "";
+        }
+        String metadataServiceUri = "zk://" + System.getProperty("zk.address") + path;
+
+        config = config.setMetadataServiceUri(metadataServiceUri);
+
+        config = config.setEnsemblePlacementPolicy(DefaultEnsemblePlacementPolicy.class);
+
         try {
-            return new BookKeeper(zkConnectionString);
+            return new BookKeeper(config);
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         }
@@ -84,8 +122,8 @@ public class BKPerfTest {
     }
 
     public static void main(String[] args) {
-        // Connect to zk (and register metadata?)
-        BookKeeper bk = createBkClient("127.0.0.1:2181");
+        // Connect to zk. eg. "127.0.0.1:2181"; "wal-1-zk-client:2281"
+        BookKeeper bk = createBkClient();
 
         System.out.println("Creating a ledger...");
         LedgerHandle lh = createLedger(bk, "ledger-1", "password".getBytes());

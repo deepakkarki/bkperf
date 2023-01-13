@@ -11,6 +11,11 @@ jar {
     }
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
 task fatJar(type: Jar) {
     manifest.from jar.manifest
     classifier = 'all'
@@ -31,4 +36,5 @@ repositories {
 
 dependencies {
     implementation 'org.apache.bookkeeper:bookkeeper-server:4.15.3'
+    implementation 'org.slf4j:slf4j-log4j12:2.0.5'
 }
