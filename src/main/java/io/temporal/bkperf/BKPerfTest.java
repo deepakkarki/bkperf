@@ -2,6 +2,7 @@ package io.temporal.bkperf;
 
 import org.apache.bookkeeper.client.*;
 import org.apache.bookkeeper.client.BookKeeper.DigestType;
+import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
 import org.apache.zookeeper.ZooKeeper;
@@ -61,50 +62,37 @@ public class BKPerfTest {
         }
     }
 
-    public static LedgerHandle createLedger(BookKeeper bk, String name, byte[] password) {
+    public static LedgerHandleAdv createLedgerAdv(BookKeeper bk, long ledgerId){
+        long base = 1000000000;
+        ledgerId += base;
+        System.out.println("Creating a ledger with ID : " + ledgerId);
+        LedgerHandleAdv lh;
         try {
-            return bk.createLedger(3, 2, 2, DigestType.MAC, password, Collections.singletonMap("name", name.getBytes()));
-        } catch (Exception ex) {
-            throw new RuntimeException(ex);
+            lh = (LedgerHandleAdv) bk.createLedgerAdv(ledgerId, 3, 3, 2,
+                    DigestType.CRC32, "password".getBytes(), Collections.singletonMap("name", "name".getBytes()));
+        } catch (Exception e){
+            throw new RuntimeException(e);
         }
+        return lh;
     }
 
-    public static LedgerHandle getLedgerReader(BookKeeper bk, long ledgerID, byte[] password) {
+    public static LedgerHandle getLedgerReader(BookKeeper bk, long ledgerID) {
         LedgerHandle reader;
         try {
-            reader = bk.openLedger(ledgerID, DigestType.MAC, password);
+            reader = bk.openLedger(ledgerID, DigestType.MAC, "password".getBytes());
         } catch (BKException | InterruptedException e) {
             throw new RuntimeException(e);
         }
         return reader;
     }
 
-    public static List<Long> listAllLedgers(BookKeeper bk) {
-        final List<Long> ledgers = Collections.synchronizedList(new ArrayList<>());
-        final CountDownLatch processDone = new CountDownLatch(1);
-
-        bk.getLedgerManager()
-                .asyncProcessLedgers((ledgerId, cb) -> {
-                            ledgers.add(ledgerId);
-                            cb.processResult(BKException.Code.OK, null, null);
-                        },
-                        (rc, s, obj) -> {
-                            processDone.countDown();
-                        }, null, BKException.Code.OK, BKException.Code.ReadException);
-
-        try {
-            processDone.await(1, TimeUnit.MINUTES);
-            return ledgers;
-        } catch (InterruptedException ie) {
-            throw new RuntimeException(ie);
-        }
-    }
-
-    public static void writeToLedger(LedgerHandle ledgerHandle){
-        for(int i = 0; i < 10; i++) {
-            byte[] data = new String("message-" + i).getBytes();
+    // write "entries" number of 1KB entries to the ledger
+    public static void writeToLedger(LedgerHandleAdv lh, long entries){
+        for(long i = 0; i < entries; i++) {
+            // average byte size
+            byte[] data = new String("message - " + i).repeat(1000).getBytes();
             try {
-                ledgerHandle.addEntry(data);
+                lh.addEntry(i, data);
             } catch (org.apache.bookkeeper.client.api.BKException | InterruptedException e) {
                 throw new RuntimeException(e);
             }
@@ -130,31 +118,22 @@ public class BKPerfTest {
     }
 
     public static void main(String[] args) {
-        writeReadAndCleanClassic();
+        owrcScenario(Integer.parseInt(System.getProperty("ledgerID")));
     }
 
-    public static void writeReadAndCleanClassic(){
-        // Connect to zk. eg. "127.0.0.1:2181"; "wal-1-zk-client:2281"
+    // open write read close scenario
+    public static void owrcScenario(long ledgerId){ //TODO : wrap in a timer
         BookKeeper bk = createBkClient();
 
-        System.out.println("Creating a ledger...");
-        LedgerHandle lh = createLedger(bk, "ledger-1", "password".getBytes());
+        LedgerHandleAdv lh = createLedgerAdv(bk, ledgerId);
+        long itemsToWrite = 25;
+        writeToLedger(lh, itemsToWrite); //TODO : wrap in a timer
 
-        System.out.println("Writing to the ledger..." + lh.getId());
-        writeToLedger(lh);
+        LedgerHandle reader = getLedgerReader(bk, lh.getId());
+        readFromLedger(reader); //TODO : wrap in a timer
 
-        System.out.println("Reading from the ledger...");
-        LedgerHandle reader = getLedgerReader(bk, lh.getId(), "password".getBytes());
-        Enumeration<LedgerEntry> entries = readFromLedger(reader);
-
-        // print out the entries
-        while (entries.hasMoreElements()) {
-            LedgerEntry entry = entries.nextElement();
-            System.out.println("Successfully read entry " + entry.getEntryId());
-        }
 
         // try to close the reader and writer; delete the ledger
-        long ledgerId = lh.getId();
         try {
             lh.close();
             reader.close();
@@ -163,16 +142,33 @@ public class BKPerfTest {
         }
         deleteLedger(bk, ledgerId);
 
-        // list all ledgers
-        System.out.println("Ledgers in the system" + listAllLedgers(bk));
-
         // close the bookkeeper client
         try {
             bk.close();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-        System.out.println("Done");
-        System.exit(0); // otherwise some background threads get it to hang here.
+    }
+
+    // unused for now
+    public static List<Long> listAllLedgers(BookKeeper bk) {
+        final List<Long> ledgers = Collections.synchronizedList(new ArrayList<>());
+        final CountDownLatch processDone = new CountDownLatch(1);
+
+        bk.getLedgerManager()
+                .asyncProcessLedgers((ledgerId, cb) -> {
+                            ledgers.add(ledgerId);
+                            cb.processResult(BKException.Code.OK, null, null);
+                        },
+                        (rc, s, obj) -> {
+                            processDone.countDown();
+                        }, null, BKException.Code.OK, BKException.Code.ReadException);
+
+        try {
+            processDone.await(1, TimeUnit.MINUTES);
+            return ledgers;
+        } catch (InterruptedException ie) {
+            throw new RuntimeException(ie);
+        }
     }
 }
