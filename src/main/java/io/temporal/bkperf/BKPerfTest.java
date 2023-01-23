@@ -2,21 +2,18 @@ package io.temporal.bkperf;
 
 import org.apache.bookkeeper.client.*;
 import org.apache.bookkeeper.client.BookKeeper.DigestType;
-import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.conf.ClientConfiguration;
-import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
-import org.apache.zookeeper.ZooKeeper;
-import org.apache.zookeeper.client.ZKClientConfig;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class BKPerfTest {
 
-    // System properties required
-    //      tls.enable tls.trustStore.path tls.trustStore.passwordPath
-    //      tls.clientAuth tls.keyStore.path tls.keyStore.passwordPath
     public static BookKeeper createBkClient() {
         int writeTimeout = (int) Math.ceil(6000 / 1000.0); // hardcoded values, replace later
         int readTimeout = (int) Math.ceil(6000 / 1000.0);
@@ -63,7 +60,7 @@ public class BKPerfTest {
     }
 
     public static LedgerHandleAdv createLedgerAdv(BookKeeper bk, long ledgerId){
-        long base = 1000000000;
+        long base = 1000000;
         ledgerId += base;
         System.out.println("Creating a ledger with ID : " + ledgerId);
         LedgerHandleAdv lh;
@@ -89,12 +86,12 @@ public class BKPerfTest {
     // write "entries" number of 1KB entries to the ledger
     public static void writeToLedger(LedgerHandleAdv lh, long entries){
         for(long i = 0; i < entries; i++) {
-            // average byte size
-            byte[] data = new String("message - " + i).repeat(1000).getBytes();
+            // average byte size = 1KB
+            byte[] data = ("message - " + i).repeat(1000).getBytes();
             try {
                 lh.addEntry(i, data);
             } catch (org.apache.bookkeeper.client.api.BKException | InterruptedException e) {
-                throw new RuntimeException(e);
+                System.out.println("Error writing entry: " + i);
             }
         }
     }
@@ -118,20 +115,62 @@ public class BKPerfTest {
     }
 
     public static void main(String[] args) {
-        owrcScenario(Integer.parseInt(System.getProperty("ledgerID")));
+        System.out.println("Starting...");
+        long startingLedgerId = Integer.parseInt(System.getProperty("ledgerID"));
+        int load = Integer.parseInt(System.getProperty("load"));
+
+        CountDownLatch countDownLatch = new CountDownLatch(load);
+        BKMetric[] metrics = new BKMetric[load];
+        for (int i =0; i < load; i++){
+            long j = i; // because not sure how closures work in java
+            new Thread( () -> {
+                System.out.println("Starting ledger #" + j);
+                BKMetric metric = owrcScenario(startingLedgerId+j, 25);
+                metrics[(int)j] = metric;
+                countDownLatch.countDown();
+            }).start();
+        }
+        try {
+            countDownLatch.await();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        BKMetric metric = BKMetric.summarize(metrics);
+        try{
+            metric.write("metrics.log", load+", ");
+        } catch (Exception e) {
+
+        }
+        System.out.println("Done...");
     }
 
     // open write read close scenario
-    public static void owrcScenario(long ledgerId){ //TODO : wrap in a timer
+    public static BKMetric owrcScenario(long ledgerId, long writeCount){
+        long startTime = Instant.now().toEpochMilli();
+        BKMetric metric = new BKMetric();
         BookKeeper bk = createBkClient();
 
+        // create ledger and record the time
+        long beforeCreate = Instant.now().toEpochMilli();
         LedgerHandleAdv lh = createLedgerAdv(bk, ledgerId);
-        long itemsToWrite = 25;
-        writeToLedger(lh, itemsToWrite); //TODO : wrap in a timer
+        metric.createTime = Instant.now().toEpochMilli() - beforeCreate;
 
+        // write 'writeCount' entries (each ~1KB) to the ledger
+        long beforeWrite = Instant.now().toEpochMilli();
+        writeToLedger(lh, writeCount);
+        metric.writeTime = Instant.now().toEpochMilli() - beforeWrite;
+
+        // read the ledger and record the time
         LedgerHandle reader = getLedgerReader(bk, lh.getId());
-        readFromLedger(reader); //TODO : wrap in a timer
+        long beforeRead = Instant.now().toEpochMilli();
+        Enumeration<LedgerEntry> entries = readFromLedger(reader);
+        metric.readTime = Instant.now().toEpochMilli() - beforeRead;
 
+        // sanity check the values read
+        long itemsRead = readSize(entries);
+        if (itemsRead != writeCount){
+            System.out.printf("Ledger: %d - only %d items read. %d expected.\n", ledgerId, itemsRead, writeCount);
+        }
 
         // try to close the reader and writer; delete the ledger
         try {
@@ -148,6 +187,18 @@ public class BKPerfTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+
+        metric.totalTime = Instant.now().toEpochMilli() - startTime;
+        return metric;
+    }
+
+    private static long readSize(Enumeration<LedgerEntry> items){
+        long ic = 0;
+        while(items.hasMoreElements()) {
+            items.nextElement();
+            ic++;
+        }
+        return ic;
     }
 
     // unused for now
@@ -170,5 +221,44 @@ public class BKPerfTest {
         } catch (InterruptedException ie) {
             throw new RuntimeException(ie);
         }
+    }
+}
+
+
+class BKMetric {
+    public long createTime;
+    public long writeTime;
+    public long readTime;
+    public long totalTime;
+
+    public BKMetric(){
+        this.createTime = 0;
+        this.writeTime = 0;
+        this.readTime = 0;
+        this.totalTime = 0;
+    }
+
+    public static BKMetric summarize(BKMetric[] metrics){
+        BKMetric bk = new BKMetric();
+        for (BKMetric metric : metrics) {
+            bk.createTime += metric.createTime;
+            bk.writeTime += metric.writeTime;
+            bk.readTime += metric.readTime;
+            bk.totalTime += metric.totalTime;
+        }
+        bk.createTime /= metrics.length;
+        bk.writeTime /= metrics.length;
+        bk.readTime /= metrics.length;
+        bk.totalTime /= metrics.length;
+        return bk;
+    }
+
+    // write the metrics to a file
+    public void write(String fileName, String prefix)throws IOException {
+        String str = String.format("%d, %d, %d, %d\n", createTime, writeTime, readTime, totalTime);
+        BufferedWriter writer = new BufferedWriter(new FileWriter(fileName, true));
+        writer.append(prefix + str);
+        writer.flush();
+        writer.close();
     }
 }
