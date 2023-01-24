@@ -3,6 +3,7 @@ package io.temporal.bkperf;
 import org.apache.bookkeeper.client.*;
 import org.apache.bookkeeper.client.BookKeeper.DigestType;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.logging.log4j.message.EntryMessage;
 
 import java.io.BufferedWriter;
 import java.io.FileWriter;
@@ -65,7 +66,7 @@ public class BKPerfTest {
         try {
             lh = (LedgerHandleAdv) bk.createLedgerAdv(3, 3, 2,
                     DigestType.CRC32, "password".getBytes(), Collections.singletonMap("name", "name".getBytes()));
-            System.out.println("Created a ledger with ID : " + lh.getId());
+//            System.out.println("Created a ledger with ID : " + lh.getId());
         } catch (Exception e){
             throw new RuntimeException(e);
         }
@@ -100,11 +101,23 @@ public class BKPerfTest {
     }
 
     public static Enumeration<LedgerEntry> readFromLedger(LedgerHandle ledgerHandle){
-        Enumeration<LedgerEntry> entries;
+        Enumeration<LedgerEntry> entries = new Enumeration<>() {
+            @Override
+            public boolean hasMoreElements() {
+                return false;
+            }
+
+            @Override
+            public LedgerEntry nextElement() {
+                return null;
+            }
+        };
+        long latest = ledgerHandle.getLastAddConfirmed();
         try {
-            entries = ledgerHandle.readEntries(0, ledgerHandle.getLastAddConfirmed());
+            entries = ledgerHandle.readEntries(0, latest);
         } catch (InterruptedException | BKException e) {
-            throw new RuntimeException(e);
+            System.out.println("[ERROR] Latest : " + latest);
+//            throw new RuntimeException(e);
         }
         return entries;
     }
@@ -118,29 +131,38 @@ public class BKPerfTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("Starting...");
-        int load = Integer.parseInt(System.getProperty("load")); // concurrency level
+        int load = Integer.parseInt(System.getProperty("load")); // concurrency level (# of threads/epoch)
+        long duration = Integer.parseInt(System.getProperty("duration")); // duration in seconds
+        System.out.println("Starting simulation: "+load+ " concurrent connections for " + duration + "seconds...");
+
         BookKeeper bk = createBkClient();
 
-        CountDownLatch countDownLatch = new CountDownLatch(load);
-        BKMetric[] metrics = new BKMetric[load];
-        for (int i =0; i < load; i++){
-            long j = i; // because not sure how closures work in java
-            new Thread( () -> {
-                System.out.println("Starting ledger #" + j);
-                BKMetric metric = owrcScenario(bk, 10);
-                metrics[(int)j] = metric;
-                countDownLatch.countDown();
-            }).start();
+        // List of epoch results
+        List<BKMetric> epochMetrics = Collections.synchronizedList(new ArrayList<>(10));;
+        long timeout = System.currentTimeMillis() + (duration * 1000);
+        while(System.currentTimeMillis() < timeout){
+            CountDownLatch countDownLatch = new CountDownLatch(load);
+            BKMetric[] metrics = new BKMetric[load];
+            for (int i =0; i < load; i++){
+                long j = i;
+                new Thread( () -> {
+                    BKMetric metric = owrcScenario(bk, 10);
+                    metrics[(int)j] = metric;
+                    countDownLatch.countDown();
+                }).start();
+            }
+            try {
+                countDownLatch.await();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            epochMetrics.add(BKMetric.summarize(metrics));
         }
-        try {
-            countDownLatch.await();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+
+        BKMetric[] metrics = epochMetrics.toArray(new BKMetric[0]);
         BKMetric metric = BKMetric.summarize(metrics);
         try{
-            metric.write("metrics.log", load+", ");
+            metric.write("metrics.log", load + "* [" +metrics.length+"], ");
         } catch (Exception e) {
             System.out.println("Error writing output to file");
         }
