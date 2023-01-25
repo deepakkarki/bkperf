@@ -3,6 +3,7 @@ package io.temporal.bkperf;
 import org.apache.bookkeeper.client.*;
 import org.apache.bookkeeper.client.BookKeeper.DigestType;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.meta.HierarchicalLedgerManagerFactory;
 import org.apache.logging.log4j.message.EntryMessage;
 
 import java.io.BufferedWriter;
@@ -26,6 +27,7 @@ public class BKPerfTest {
                 .setEnableDigestTypeAutodetection(true)
                 .setClientConnectTimeoutMillis(10000)
                 .setZkTimeout(10000);
+        config.setLedgerManagerFactoryClass(HierarchicalLedgerManagerFactory.class);
 
         if (System.getProperty("tls.enable") != null && System.getProperty("tls.enable").equals("true")) {
             config = config.setTLSProvider("OpenSSL");
